@@ -1,3 +1,4 @@
+
 import React, { useState, useEffect, useCallback } from 'react';
 import { CHILDREN, ChildId, Transaction, TransactionType, StudyCategory, WithdrawCategory, AppSettings, DEFAULT_SETTINGS } from './types';
 import { getEncouragementMessage } from './services/geminiService';
@@ -22,10 +23,22 @@ import {
   MonitorPlay,
   Cloud,
   CheckCircle2,
-  Save
+  Key,
+  AlertCircle,
+  ExternalLink,
+  ChevronRight
 } from 'lucide-react';
 
 // --- Helper Components ---
+
+// Fix: Added formatTime helper function to convert minutes into a readable time string (e.g., 90 -> 1시간 30분)
+const formatTime = (minutes: number) => {
+  const absMins = Math.abs(minutes);
+  if (absMins < 60) return `${absMins}분`;
+  const h = Math.floor(absMins / 60);
+  const m = absMins % 60;
+  return m === 0 ? `${h}시간` : `${h}시간 ${m}분`;
+};
 
 const Modal = ({ 
   isOpen, 
@@ -42,7 +55,7 @@ const Modal = ({
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-in fade-in duration-200">
       <div className="bg-white rounded-3xl w-full max-w-sm shadow-2xl overflow-hidden animate-in zoom-in-95 duration-200 flex flex-col max-h-[90vh]">
-        <div className="p-6 pb-2 flex justify-between items-center bg-white z-10">
+        <div className="p-6 pb-2 flex justify-between items-center bg-white z-10 border-b border-slate-50">
           <h3 className="text-xl font-display font-bold text-slate-800">{title}</h3>
           <button onClick={onClose} className="p-2 -mr-2 text-slate-400 hover:text-slate-600 rounded-full hover:bg-slate-100">
             <X size={20} />
@@ -106,6 +119,7 @@ const App = () => {
   const [activeChildId, setActiveChildId] = useState<ChildId>('seoa');
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
+  const [hasApiKey, setHasApiKey] = useState<boolean | null>(null); // null means checking
   
   // Modal States
   const [isModalOpen, setIsModalOpen] = useState(false);
@@ -128,27 +142,37 @@ const App = () => {
 
   const activeChild = CHILDREN[activeChildId];
 
-  // --- Persistence & Initialization ---
+  // Fix: Added theme object to dynamically style the dashboard based on the active child's color
+  const theme = {
+    bg: activeChildId === 'seoa' ? 'bg-gradient-to-br from-rose-400 to-rose-500' : 'bg-gradient-to-br from-sky-400 to-sky-500',
+    text: activeChildId === 'seoa' ? 'text-rose-600' : 'text-sky-600',
+    lightBg: activeChildId === 'seoa' ? 'bg-rose-50' : 'bg-sky-50',
+  };
+
+  // --- Persistence & API Key Check ---
 
   useEffect(() => {
-    const savedTx = localStorage.getItem('timeBankTransactions');
-    const savedSettings = localStorage.getItem('timeBankSettings');
-    
-    if (savedTx) {
-      try {
-        setTransactions(JSON.parse(savedTx));
-      } catch (e) { console.error(e); }
-    }
-    
-    if (savedSettings) {
-      try {
-        setSettings(JSON.parse(savedSettings));
-      } catch (e) { console.error(e); }
-    }
+    const init = async () => {
+      // Load data
+      const savedTx = localStorage.getItem('timeBankTransactions');
+      const savedSettings = localStorage.getItem('timeBankSettings');
+      if (savedTx) { try { setTransactions(JSON.parse(savedTx)); } catch (e) { console.error(e); } }
+      if (savedSettings) { try { setSettings(JSON.parse(savedSettings)); } catch (e) { console.error(e); } }
+
+      // Check API Key
+      // @ts-ignore
+      if (window.aistudio) {
+        // @ts-ignore
+        const keySelected = await window.aistudio.hasSelectedApiKey();
+        setHasApiKey(keySelected);
+      } else {
+        setHasApiKey(true); // Default to true if outside studio environment
+      }
+    };
+    init();
   }, []);
 
   useEffect(() => {
-    // Simulate server sync delay
     setSyncStatus('syncing');
     const timer = setTimeout(() => {
         localStorage.setItem('timeBankTransactions', JSON.stringify(transactions));
@@ -158,19 +182,14 @@ const App = () => {
     return () => clearTimeout(timer);
   }, [transactions, settings]);
 
-  // --- Interest Check Logic ---
+  // --- Interest Logic ---
   useEffect(() => {
     if (transactions.length === 0) return;
-
     let newInterestTx: Transaction[] = [];
-    
     (['seoa', 'seou'] as ChildId[]).forEach(id => {
        const interestTx = processInterest(transactions, id, settings);
-       if (interestTx.length > 0) {
-         newInterestTx = [...newInterestTx, ...interestTx];
-       }
+       if (interestTx.length > 0) newInterestTx = [...newInterestTx, ...interestTx];
     });
-
     if (newInterestTx.length > 0) {
       setTransactions(prev => [...prev, ...newInterestTx]);
       setAiToast(`와우! TV를 참아서 이자가 ${newInterestTx.length}건 쌓였어요! 🎉`);
@@ -184,8 +203,6 @@ const App = () => {
 
   const handleTransaction = async () => {
     if (inputAmount <= 0) return;
-    
-    // Preliminary balance check
     if (modalType === 'withdraw' && inputAmount > currentBalance) {
       alert("저축된 시간이 부족해요! 공부를 더 해서 시간을 모아보세요. 💪");
       return;
@@ -197,20 +214,16 @@ const App = () => {
       const aiMessage = await getEncouragementMessage(activeChild.name, inputAmount, modalType);
       
       let finalAmount = inputAmount;
-      let note = '';
       let multiplier = 1;
 
       if (modalType === 'deposit') {
         multiplier = settings.multipliers[selectedStudyType];
         finalAmount = Math.floor(inputAmount * multiplier);
-        note = getStudyCategoryLabel(selectedStudyType);
       } else if (modalType === 'withdraw') {
         multiplier = settings.withdrawMultipliers[selectedWithdrawType];
         finalAmount = Math.floor(inputAmount * multiplier);
-        note = getWithdrawCategoryLabel(selectedWithdrawType);
-        
         if (finalAmount > currentBalance) {
-            alert("차감 배수가 적용되어 시간이 부족해요! (" + finalAmount + "분 필요)");
+            alert(`차감 배수가 적용되어 시간이 부족해요! (${finalAmount}분 필요)`);
             setIsProcessing(false);
             return;
         }
@@ -223,24 +236,39 @@ const App = () => {
         amount: finalAmount,
         baseAmount: inputAmount,
         multiplier: multiplier,
-        studyCategory: modalType === 'deposit' ? selectedStudyType : undefined,
-        withdrawCategory: modalType === 'withdraw' ? selectedWithdrawType : undefined,
         timestamp: Date.now(),
         aiMessage: aiMessage,
-        note: note
+        note: modalType === 'deposit' ? getStudyCategoryLabel(selectedStudyType) : getWithdrawCategoryLabel(selectedWithdrawType)
       };
 
       setTransactions(prev => [newTransaction, ...prev]);
       setAiToast(aiMessage);
       setTimeout(() => setAiToast(null), 5000);
 
-    } catch (error) {
+    } catch (error: any) {
       console.error(error);
+      if (error.message === "API_KEY_ISSUE") {
+        alert("구글 클라우드 API 키 설정에 문제가 발생했습니다. 키를 다시 선택해 주세요.");
+        handleOpenApiKeySelection();
+      }
     } finally {
       setIsProcessing(false);
       setIsModalOpen(false);
       setInputAmount(0);
       setStep('category-select'); 
+    }
+  };
+
+  const handleOpenApiKeySelection = async () => {
+    // @ts-ignore
+    if (window.aistudio) {
+        // @ts-ignore
+        await window.aistudio.openSelectKey();
+        setHasApiKey(true); // Proceed assuming success per guidelines
+        setAiToast("API 키가 성공적으로 설정되었습니다!");
+        setTimeout(() => setAiToast(null), 3000);
+    } else {
+        alert("API 키를 선택할 수 없는 환경입니다.");
     }
   };
 
@@ -251,111 +279,92 @@ const App = () => {
     setIsModalOpen(true);
   };
 
-  const handleParentLogin = () => {
-    setTimeout(() => {
-      setIsParentMode(true);
-      setShowLoginModal(false);
-      setAiToast("부모님 계정으로 로그인되었습니다.");
-      setTimeout(() => setAiToast(null), 3000);
-    }, 1000);
-  };
-
-  const formatTime = (minutes: number) => {
-    const h = Math.floor(minutes / 60);
-    const m = minutes % 60;
-    if (h > 0) return `${h}시간 ${m}분`;
-    return `${m}분`;
-  };
-
-  const getChildThemeClasses = (childId: ChildId) => {
-    return childId === 'seoa' 
-      ? { bg: 'bg-rose-500', text: 'text-rose-500', border: 'border-rose-200', soft: 'bg-rose-50' }
-      : { bg: 'bg-sky-500', text: 'text-sky-500', border: 'border-sky-200', soft: 'bg-sky-50' };
-  };
-
-  const theme = getChildThemeClasses(activeChildId);
-
-  // --- Sub-renderers ---
-
+  // Fix: Added renderStudyCategorySelection to provide UI for selecting study types
   const renderStudyCategorySelection = () => (
-    <div className="grid grid-cols-1 gap-3">
-      <p className="text-center text-slate-500 mb-2">어떤 공부를 했나요?</p>
-      
-      <button 
-        onClick={() => { setSelectedStudyType('workbook'); setStep('amount-input'); }}
-        className="flex items-center p-4 bg-green-50 border border-green-100 rounded-2xl hover:bg-green-100 transition-colors"
-      >
-        <div className="bg-white p-3 rounded-full shadow-sm mr-4">
-          <PenTool className="text-green-600" />
-        </div>
-        <div className="text-left flex-1">
-          <p className="font-bold text-slate-700 text-lg">문제집 풀기</p>
-          <p className="text-xs text-slate-500">2배로 적립해줘요! (x{settings.multipliers.workbook})</p>
-        </div>
-        <div className="bg-green-600 text-white text-xs font-bold px-2 py-1 rounded-lg">x{settings.multipliers.workbook}</div>
-      </button>
-
-      <button 
-        onClick={() => { setSelectedStudyType('book'); setStep('amount-input'); }}
-        className="flex items-center p-4 bg-emerald-50 border border-emerald-100 rounded-2xl hover:bg-emerald-100 transition-colors"
-      >
-        <div className="bg-white p-3 rounded-full shadow-sm mr-4">
-          <BookOpen className="text-emerald-600" />
-        </div>
-        <div className="text-left flex-1">
-          <p className="font-bold text-slate-700 text-lg">책 보기</p>
-          <p className="text-xs text-slate-500">1.5배로 적립해줘요! (x{settings.multipliers.book})</p>
-        </div>
-        <div className="bg-emerald-600 text-white text-xs font-bold px-2 py-1 rounded-lg">x{settings.multipliers.book}</div>
-      </button>
-
-      <button 
-        onClick={() => { setSelectedStudyType('video'); setStep('amount-input'); }}
-        className="flex items-center p-4 bg-teal-50 border border-teal-100 rounded-2xl hover:bg-teal-100 transition-colors"
-      >
-        <div className="bg-white p-3 rounded-full shadow-sm mr-4">
-          <PlaySquare className="text-teal-600" />
-        </div>
-        <div className="text-left flex-1">
-          <p className="font-bold text-slate-700 text-lg">영상 공부</p>
-          <p className="text-xs text-slate-500">1.2배로 적립해줘요! (x{settings.multipliers.video})</p>
-        </div>
-        <div className="bg-teal-600 text-white text-xs font-bold px-2 py-1 rounded-lg">x{settings.multipliers.video}</div>
-      </button>
+    <div className="space-y-3">
+      {[
+        { id: 'workbook', label: '문제집 풀기', icon: <PenTool size={20} />, color: 'bg-blue-50 text-blue-600' },
+        { id: 'book', label: '책 읽기', icon: <BookOpen size={20} />, color: 'bg-emerald-50 text-emerald-600' },
+        { id: 'video', label: '영상 공부', icon: <PlaySquare size={20} />, color: 'bg-purple-50 text-purple-600' },
+      ].map((cat) => (
+        <button
+          key={cat.id}
+          onClick={() => { setSelectedStudyType(cat.id as StudyCategory); setStep('amount-input'); }}
+          className="w-full flex items-center justify-between p-4 rounded-2xl bg-slate-50 hover:bg-slate-100 transition-colors group"
+        >
+          <div className="flex items-center gap-3">
+            <div className={`w-10 h-10 rounded-xl flex items-center justify-center ${cat.color}`}>{cat.icon}</div>
+            <span className="font-bold text-slate-700">{cat.label}</span>
+          </div>
+          <ChevronRight size={18} className="text-slate-300 group-hover:text-slate-400 transition-colors" />
+        </button>
+      ))}
     </div>
   );
 
+  // Fix: Added renderWithdrawCategorySelection to provide UI for selecting usage types
   const renderWithdrawCategorySelection = () => (
-    <div className="grid grid-cols-1 gap-3">
-      <p className="text-center text-slate-500 mb-2">무엇을 볼 건가요?</p>
-      
-      <button 
-        onClick={() => { setSelectedWithdrawType('youtube_game'); setStep('amount-input'); }}
-        className="flex items-center p-4 bg-red-50 border border-red-100 rounded-2xl hover:bg-red-100 transition-colors"
-      >
-        <div className="bg-white p-3 rounded-full shadow-sm mr-4">
-          <Gamepad2 className="text-red-500" />
-        </div>
-        <div className="text-left flex-1">
-          <p className="font-bold text-slate-700 text-lg">유튜브/게임</p>
-          <p className="text-xs text-slate-500">시간이 빨리 사라져요! (x{settings.withdrawMultipliers.youtube_game} 차감)</p>
-        </div>
-        <div className="bg-red-500 text-white text-xs font-bold px-2 py-1 rounded-lg">x{settings.withdrawMultipliers.youtube_game}</div>
-      </button>
+    <div className="space-y-3">
+      {[
+        { id: 'youtube_game', label: '유튜브/게임', icon: <Gamepad2 size={20} />, color: 'bg-orange-50 text-orange-600' },
+        { id: 'tv_watch', label: 'TV 시청', icon: <MonitorPlay size={20} />, color: 'bg-red-50 text-red-600' },
+      ].map((cat) => (
+        <button
+          key={cat.id}
+          onClick={() => { setSelectedWithdrawType(cat.id as WithdrawCategory); setStep('amount-input'); }}
+          className="w-full flex items-center justify-between p-4 rounded-2xl bg-slate-50 hover:bg-slate-100 transition-colors group"
+        >
+          <div className="flex items-center gap-3">
+            <div className={`w-10 h-10 rounded-xl flex items-center justify-center ${cat.color}`}>{cat.icon}</div>
+            <span className="font-bold text-slate-700">{cat.label}</span>
+          </div>
+          <ChevronRight size={18} className="text-slate-300 group-hover:text-slate-400 transition-colors" />
+        </button>
+      ))}
+    </div>
+  );
 
-      <button 
-        onClick={() => { setSelectedWithdrawType('tv_watch'); setStep('amount-input'); }}
-        className="flex items-center p-4 bg-orange-50 border border-orange-100 rounded-2xl hover:bg-orange-100 transition-colors"
-      >
-        <div className="bg-white p-3 rounded-full shadow-sm mr-4">
-          <MonitorPlay className="text-orange-500" />
-        </div>
-        <div className="text-left flex-1">
-          <p className="font-bold text-slate-700 text-lg">TV 시청</p>
-          <p className="text-xs text-slate-500">일반적으로 차감돼요. (x{settings.withdrawMultipliers.tv_watch} 차감)</p>
-        </div>
-        <div className="bg-orange-500 text-white text-xs font-bold px-2 py-1 rounded-lg">x{settings.withdrawMultipliers.tv_watch}</div>
-      </button>
+  // --- Sub-renderers ---
+
+  const Onboarding = () => (
+    <div className="min-h-screen bg-white flex flex-col items-center justify-center p-8 text-center animate-in fade-in duration-700">
+      <div className="w-24 h-24 bg-yellow-100 rounded-[2rem] flex items-center justify-center mb-8 shadow-inner animate-bounce">
+         <PiggyBank size={48} className="text-yellow-500" fill="currentColor" />
+      </div>
+      <h1 className="text-3xl font-display font-bold text-slate-800 mb-4">반가워요!<br/>시간 저금통입니다</h1>
+      <p className="text-slate-500 mb-8 leading-relaxed">
+        아이들의 공부 시간을 Gemini AI와 함께<br/>
+        즐겁게 관리해 보세요. 시작하려면<br/>
+        <strong>구글 클라우드 API 키</strong> 설정이 필요합니다.
+      </p>
+
+      <div className="w-full max-w-xs space-y-4">
+        <button 
+          onClick={handleOpenApiKeySelection}
+          className="w-full py-4 bg-indigo-600 text-white rounded-2xl font-bold shadow-lg shadow-indigo-100 flex items-center justify-center gap-2 active:scale-95 transition-all"
+        >
+          <Key size={20} />
+          API 키 설정하기
+        </button>
+        
+        <a 
+          href="https://ai.google.dev/gemini-api/docs/billing" 
+          target="_blank" 
+          rel="noopener noreferrer"
+          className="flex items-center justify-center gap-1 text-xs text-slate-400 hover:text-indigo-500 transition-colors py-2"
+        >
+          <AlertCircle size={14} />
+          결제 및 요금 안내 확인하기 <ExternalLink size={12} />
+        </a>
+      </div>
+
+      <div className="mt-12 p-4 bg-slate-50 rounded-2xl border border-slate-100 text-left text-[11px] text-slate-400">
+         <p className="font-bold text-slate-500 mb-1">💡 도움말</p>
+         <ul className="list-disc list-inside space-y-1">
+           <li>유료(Paid) 구글 클라우드 프로젝트의 키가 필요합니다.</li>
+           <li>키 설정 후 Gemini AI가 아이들을 칭찬해줍니다!</li>
+         </ul>
+      </div>
     </div>
   );
 
@@ -364,343 +373,167 @@ const App = () => {
       const txs = transactions.filter(t => t.childId === childId);
       const earned = txs.filter(t => t.type === 'deposit' || t.type === 'interest').reduce((acc, t) => acc + t.amount, 0);
       const spent = txs.filter(t => t.type === 'withdraw').reduce((acc, t) => acc + t.amount, 0);
-      const balance = earned - spent;
-      return { earned, spent, balance };
+      return { earned, spent, balance: earned - spent };
     };
 
     return (
       <div className="p-4 space-y-6">
         <div className="flex items-center justify-between">
             <h2 className="text-xl font-bold text-slate-800 flex items-center gap-2">
-            <UserCircle2 className="text-indigo-500" />
-            부모님 대시보드
+              <UserCircle2 className="text-indigo-500" /> 부모님 대시보드
             </h2>
-            <div className="flex items-center gap-1.5 text-xs text-slate-500 bg-slate-100 px-2 py-1 rounded-full">
-                {syncStatus === 'syncing' ? (
-                    <>
-                        <Cloud size={14} className="animate-pulse text-indigo-500" />
-                        <span>저장 중...</span>
-                    </>
-                ) : (
-                    <>
-                        <CheckCircle2 size={14} className="text-green-500" />
-                        <span>서버 동기화됨</span>
-                    </>
-                )}
+            <div className="flex items-center gap-1.5 text-[10px] text-slate-500 bg-slate-100 px-3 py-1 rounded-full border border-slate-200">
+                {syncStatus === 'syncing' ? <Cloud size={12} className="animate-pulse text-indigo-500" /> : <CheckCircle2 size={12} className="text-green-500" />}
+                <span>{syncStatus === 'syncing' ? '저장 중' : '동기화됨'}</span>
             </div>
         </div>
         
-        {/* Seoa Stats */}
-        <div className="bg-white rounded-3xl p-6 shadow-sm border border-rose-100 relative overflow-hidden">
-          <div className="absolute top-0 right-0 w-24 h-24 bg-rose-50 rounded-full -mr-8 -mt-8 z-0"></div>
-          <div className="relative z-10">
-            <div className="flex items-center gap-3 mb-4">
-              <span className="text-3xl">👧🏻</span>
-              <div>
-                <h3 className="font-bold text-slate-800 text-lg">최서아</h3>
-                <span className="text-xs bg-rose-100 text-rose-600 px-2 py-0.5 rounded-full font-bold">Rose Theme</span>
-              </div>
-            </div>
-            
-            <div className="grid grid-cols-3 gap-2 text-center">
-              <div className="p-2 bg-slate-50 rounded-xl">
-                <p className="text-xs text-slate-400 mb-1">총 적립</p>
-                <p className="font-bold text-green-600 text-lg">{formatTime(getStats('seoa').earned)}</p>
-              </div>
-              <div className="p-2 bg-slate-50 rounded-xl">
-                <p className="text-xs text-slate-400 mb-1">총 사용</p>
-                <p className="font-bold text-red-500 text-lg">{formatTime(getStats('seoa').spent)}</p>
-              </div>
-              <div className="p-2 bg-rose-50 rounded-xl border border-rose-100">
-                <p className="text-xs text-rose-400 mb-1">현재 잔액</p>
-                <p className="font-bold text-rose-600 text-lg">{formatTime(getStats('seoa').balance)}</p>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        {/* Seou Stats */}
-        <div className="bg-white rounded-3xl p-6 shadow-sm border border-sky-100 relative overflow-hidden">
-          <div className="absolute top-0 right-0 w-24 h-24 bg-sky-50 rounded-full -mr-8 -mt-8 z-0"></div>
-          <div className="relative z-10">
-            <div className="flex items-center gap-3 mb-4">
-              <span className="text-3xl">👦🏻</span>
-              <div>
-                <h3 className="font-bold text-slate-800 text-lg">최서우</h3>
-                <span className="text-xs bg-sky-100 text-sky-600 px-2 py-0.5 rounded-full font-bold">Sky Theme</span>
-              </div>
-            </div>
-            
-            <div className="grid grid-cols-3 gap-2 text-center">
-              <div className="p-2 bg-slate-50 rounded-xl">
-                <p className="text-xs text-slate-400 mb-1">총 적립</p>
-                <p className="font-bold text-green-600 text-lg">{formatTime(getStats('seou').earned)}</p>
-              </div>
-              <div className="p-2 bg-slate-50 rounded-xl">
-                <p className="text-xs text-slate-400 mb-1">총 사용</p>
-                <p className="font-bold text-red-500 text-lg">{formatTime(getStats('seou').spent)}</p>
-              </div>
-              <div className="p-2 bg-sky-50 rounded-xl border border-sky-100">
-                <p className="text-xs text-sky-400 mb-1">현재 잔액</p>
-                <p className="font-bold text-sky-600 text-lg">{formatTime(getStats('seou').balance)}</p>
-              </div>
-            </div>
-          </div>
-        </div>
+        {(['seoa', 'seou'] as ChildId[]).map(id => {
+            const stat = getStats(id);
+            const isSeoa = id === 'seoa';
+            return (
+                <div key={id} className={`bg-white rounded-3xl p-6 shadow-sm border border-${isSeoa ? 'rose' : 'sky'}-100 relative overflow-hidden`}>
+                    <div className="relative z-10">
+                        <div className="flex items-center gap-3 mb-4">
+                            <span className="text-3xl">{CHILDREN[id].avatarEmoji}</span>
+                            <div>
+                                <h3 className="font-bold text-slate-800 text-lg">{CHILDREN[id].name}</h3>
+                                <span className={`text-[10px] bg-${isSeoa ? 'rose' : 'sky'}-100 text-${isSeoa ? 'rose' : 'sky'}-600 px-2 py-0.5 rounded-full font-bold uppercase`}>{id}</span>
+                            </div>
+                        </div>
+                        <div className="grid grid-cols-3 gap-2 text-center">
+                            <div className="p-2 bg-slate-50 rounded-xl">
+                                <p className="text-[10px] text-slate-400 mb-1">적립</p>
+                                <p className="font-bold text-green-600">{formatTime(stat.earned)}</p>
+                            </div>
+                            <div className="p-2 bg-slate-50 rounded-xl">
+                                <p className="text-[10px] text-slate-400 mb-1">사용</p>
+                                <p className="font-bold text-red-500">{formatTime(stat.spent)}</p>
+                            </div>
+                            <div className={`p-2 bg-${isSeoa ? 'rose' : 'sky'}-50 rounded-xl border border-${isSeoa ? 'rose' : 'sky'}-100`}>
+                                <p className={`text-[10px] text-${isSeoa ? 'rose' : 'sky'}-400 mb-1`}>잔액</p>
+                                <p className={`font-bold text-${isSeoa ? 'rose' : 'sky'}-600`}>{formatTime(stat.balance)}</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            );
+        })}
       </div>
     );
   };
 
-  const renderChildView = () => (
-    <div className="px-4 space-y-4">
-      {/* Main Balance Card */}
-      <div className={`relative overflow-hidden rounded-3xl p-6 text-white shadow-lg transition-colors duration-500 ${theme.bg}`}>
-        <div className="absolute top-0 right-0 -mr-8 -mt-8 w-32 h-32 rounded-full bg-white opacity-20 blur-2xl"></div>
-        <div className="absolute bottom-0 left-0 -ml-8 -mb-8 w-24 h-24 rounded-full bg-white opacity-20 blur-xl"></div>
-        
-        <div className="relative z-10 text-center">
-          <p className="opacity-90 font-medium mb-1 flex items-center justify-center gap-1">
-            {activeChild.name}의 모은 시간
-          </p>
-          <div className="text-5xl font-display font-bold tracking-tight mb-2 drop-shadow-sm">
-            {formatTime(currentBalance)}
-          </div>
-          <div className="inline-flex items-center gap-1.5 bg-white/20 px-3 py-1 rounded-full text-sm font-medium backdrop-blur-md border border-white/30">
-            <Trophy size={14} className="text-yellow-300" />
-            <span>현재 {currentBalance >= 120 ? '아주 훌륭해요!' : '조금 더 모아볼까요?'}</span>
-          </div>
-        </div>
-      </div>
-
-      {/* Action Buttons */}
-      <div className="grid grid-cols-2 gap-4">
-        <button
-          onClick={() => openModal('deposit')}
-          className="group relative flex flex-col items-center justify-center p-5 bg-white rounded-2xl shadow-sm border border-slate-100 active:scale-95 transition-all hover:border-green-200"
-        >
-          <div className="w-14 h-14 rounded-full bg-green-100 flex items-center justify-center mb-3 group-hover:bg-green-200 transition-colors shadow-inner">
-            <BookOpen className="text-green-600" size={26} />
-          </div>
-          <span className="font-bold text-slate-700 text-lg">공부 기록하기</span>
-          <span className="text-xs text-slate-400 mt-1">저금통에 시간 넣기</span>
-        </button>
-
-        <button
-          onClick={() => openModal('withdraw')}
-          className="group relative flex flex-col items-center justify-center p-5 bg-white rounded-2xl shadow-sm border border-slate-100 active:scale-95 transition-all hover:border-red-200"
-        >
-          <div className="w-14 h-14 rounded-full bg-red-100 flex items-center justify-center mb-3 group-hover:bg-red-200 transition-colors shadow-inner">
-            <Tv className="text-red-600" size={26} />
-          </div>
-          <span className="font-bold text-slate-700 text-lg">TV 보기</span>
-          <span className="text-xs text-slate-400 mt-1">저금통에서 시간 쓰기</span>
-        </button>
-      </div>
-
-      {/* Charts */}
-      <StatsChart transactions={transactions.filter(t => t.childId === activeChildId)} />
-
-      {/* Recent History */}
-      <div className="bg-white rounded-3xl p-6 shadow-sm border border-slate-100 mb-8">
-        <div className="flex items-center gap-2 mb-4 border-b border-slate-50 pb-2">
-          <History size={18} className="text-slate-400" />
-          <h3 className="font-bold text-slate-700">최근 활동</h3>
-        </div>
-        
-        <div className="space-y-3">
-          {transactions.filter(t => t.childId === activeChildId).length === 0 ? (
-            <div className="text-center py-8 text-slate-400 text-sm">
-              아직 기록이 없어요. <br/> 첫 공부 시간을 저축해보세요!
-            </div>
-          ) : (
-            transactions
-              .filter(t => t.childId === activeChildId)
-              .slice(0, 15)
-              .map((t) => (
-                <div key={t.id} className="flex items-center justify-between group py-2 border-b border-slate-50 last:border-0">
-                  <div className="flex items-center gap-3">
-                    <div className={`w-10 h-10 rounded-2xl flex items-center justify-center shrink-0 shadow-sm ${
-                      t.type === 'deposit' 
-                        ? 'bg-green-100 text-green-600' 
-                        : t.type === 'interest' 
-                          ? 'bg-yellow-100 text-yellow-600'
-                          : 'bg-red-100 text-red-600'
-                    }`}>
-                      {t.type === 'deposit' ? <BookOpen size={18} /> : t.type === 'interest' ? <TrendingUp size={18} /> : <Tv size={18} />}
-                    </div>
-                    <div className="flex flex-col">
-                      <div className="flex items-baseline gap-2">
-                          <span className="font-bold text-slate-700 text-sm">
-                          {t.type === 'deposit' 
-                              ? '공부' 
-                              : t.type === 'interest' 
-                              ? '이자' 
-                              : 'TV'}
-                          </span>
-                          <span className="text-xs text-slate-500 font-medium">
-                             {t.note || (t.type === 'deposit' ? '기타 공부' : '기타 사용')}
-                          </span>
-                      </div>
-                      <span className="text-[10px] text-slate-400 mt-0.5">
-                        {new Date(t.timestamp).toLocaleDateString('ko-KR', {month:'numeric', day:'numeric'})} {new Date(t.timestamp).toLocaleTimeString('ko-KR', {hour: '2-digit', minute:'2-digit'})}
-                      </span>
-                    </div>
-                  </div>
-                  
-                  <div className="text-right">
-                      <div className={`font-display font-bold text-lg ${
-                      t.type === 'withdraw' ? 'text-red-500' : 'text-green-500'
-                      }`}>
-                      {t.type === 'withdraw' ? '-' : '+'}{t.amount}분
-                      </div>
-                      {t.baseAmount && t.baseAmount !== t.amount && (
-                          <div className="text-[10px] text-slate-400 line-through">
-                              {t.baseAmount}분
-                          </div>
-                      )}
-                  </div>
-                </div>
-              ))
-          )}
-        </div>
-      </div>
-    </div>
-  );
+  if (hasApiKey === null) return <div className="min-h-screen bg-slate-50" />;
+  if (hasApiKey === false) return <Onboarding />;
 
   return (
-    <div className="min-h-screen bg-slate-50 pb-20 max-w-md mx-auto relative shadow-2xl overflow-hidden font-sans">
+    <div className="min-h-screen bg-slate-50 pb-20 max-w-md mx-auto relative shadow-2xl overflow-hidden font-sans border-x border-slate-200">
       
       {/* Header */}
-      <header className="px-6 py-5 bg-white border-b border-slate-100 flex items-center justify-between sticky top-0 z-10 shadow-sm">
+      <header className="px-6 py-5 bg-white/90 border-b border-slate-100 flex items-center justify-between sticky top-0 z-30 backdrop-blur-md">
         <div>
           <h1 className="text-2xl font-display font-bold text-slate-800 flex items-center gap-2">
-            <PiggyBank className="text-yellow-500" fill="currentColor" />
-            시간 저금통
+            <PiggyBank className="text-yellow-500" fill="currentColor" /> 시간 저금통
           </h1>
-          <p className="text-slate-500 text-[10px] mt-0.5">
-             {isParentMode ? '👨‍👩‍👧‍👦 부모님 모드 실행 중' : '공부하면 TV 시간이 쌓여요!'}
+          <p className="text-slate-500 text-[10px] mt-0.5 font-medium">
+             {isParentMode ? '👨‍👩‍👧‍👦 관리자 모드' : '공부하고 TV 시간을 모아요!'}
           </p>
         </div>
-        <div>
+        <div className="flex gap-2">
           {isParentMode ? (
-             <div className="flex gap-2">
-               <button 
-                onClick={() => setShowSettingsModal(true)}
-                className="p-2 bg-slate-100 rounded-full text-slate-600 hover:bg-slate-200"
-               >
-                 <Settings size={20} />
-               </button>
-               <button 
-                onClick={() => { setIsParentMode(false); setAiToast("로그아웃 되었습니다."); setTimeout(() => setAiToast(null), 2000); }}
-                className="p-2 bg-slate-100 rounded-full text-slate-600 hover:bg-slate-200"
-               >
-                 <LogOut size={20} />
-               </button>
-             </div>
+             <>
+               <button onClick={() => setShowSettingsModal(true)} className="p-2 bg-slate-50 rounded-full text-slate-600 border border-slate-100 shadow-sm"><Settings size={20} /></button>
+               <button onClick={() => setIsParentMode(false)} className="p-2 bg-slate-50 rounded-full text-slate-600 border border-slate-100 shadow-sm"><LogOut size={20} /></button>
+             </>
           ) : (
-            <button 
-              onClick={() => setShowLoginModal(true)}
-              className="flex items-center gap-1 px-3 py-1.5 bg-slate-100 rounded-full text-xs font-bold text-slate-500 hover:bg-slate-200 transition-colors"
-            >
-              <UserCircle2 size={16} />
-              부모님
+            <button onClick={() => setShowLoginModal(true)} className="flex items-center gap-1.5 px-4 py-2 bg-slate-50 border border-slate-100 rounded-full text-xs font-bold text-slate-600 shadow-sm">
+              <UserCircle2 size={16} /> 부모님
             </button>
           )}
         </div>
       </header>
 
-      {/* Child Selector - Only show in Child Mode */}
+      {/* Child Selector */}
       {!isParentMode && (
-        <div className="p-4 flex gap-3 overflow-x-auto no-scrollbar">
+        <div className="p-4 flex gap-3">
           {Object.values(CHILDREN).map((child) => (
             <button
               key={child.id}
               onClick={() => setActiveChildId(child.id)}
-              className={`flex-1 flex items-center justify-center gap-3 p-3 rounded-2xl transition-all border-2 shadow-sm ${
-                activeChildId === child.id
-                  ? `border-${child.themeColor}-500 bg-${child.themeColor}-50 scale-[1.02]`
-                  : 'border-white bg-white opacity-70 grayscale-[0.5]'
+              className={`flex-1 flex items-center justify-center gap-3 p-4 rounded-3xl transition-all border-2 ${
+                activeChildId === child.id ? `border-${child.themeColor}-500 bg-${child.themeColor}-50 shadow-md scale-[1.03]` : 'border-white bg-white opacity-60'
               }`}
             >
-              <span className="text-2xl filter-none">{child.avatarEmoji}</span>
-              <span className={`font-bold ${activeChildId === child.id ? `text-${child.themeColor}-700` : 'text-slate-600'}`}>
-                {child.name}
-              </span>
+              <span className="text-3xl">{child.avatarEmoji}</span>
+              <span className={`font-bold text-sm ${activeChildId === child.id ? `text-${child.themeColor}-700` : 'text-slate-600'}`}>{child.name}</span>
             </button>
           ))}
         </div>
       )}
 
-      {/* Main Content */}
-      {isParentMode ? <ParentDashboard /> : renderChildView()}
+      {isParentMode ? <ParentDashboard /> : (
+          <div className="px-4 space-y-4">
+            <div className={`relative overflow-hidden rounded-3xl p-7 text-white shadow-xl transition-all duration-500 ${theme.bg}`}>
+                <div className="relative z-10 text-center">
+                    <p className="opacity-90 font-medium mb-1">{activeChild.name}의 모은 시간</p>
+                    <div className="text-6xl font-display font-bold tracking-tight mb-3 drop-shadow-md">{formatTime(currentBalance)}</div>
+                    <div className="inline-flex items-center gap-1.5 bg-white/20 px-4 py-1.5 rounded-full text-sm font-medium backdrop-blur-md border border-white/30">
+                        <Trophy size={14} className="text-yellow-300" />
+                        <span>{currentBalance >= 120 ? '훌륭해요!' : '더 모아볼까요?'}</span>
+                    </div>
+                </div>
+            </div>
 
-      {/* Main Action Modal */}
-      <Modal
-        isOpen={isModalOpen}
-        onClose={() => setIsModalOpen(false)}
-        title={modalType === 'deposit' ? '📚 공부 시간 기록' : '📺 TV 시청 시간'}
-      >
+            <div className="grid grid-cols-2 gap-4">
+                <button onClick={() => openModal('deposit')} className="flex flex-col items-center justify-center p-6 bg-white rounded-2xl shadow-sm border border-slate-100 active:scale-95 transition-all">
+                    <div className="w-14 h-14 rounded-full bg-green-50 flex items-center justify-center mb-3"><BookOpen className="text-green-600" size={28} /></div>
+                    <span className="font-bold text-slate-700">공부 기록</span>
+                </button>
+                <button onClick={() => openModal('withdraw')} className="flex flex-col items-center justify-center p-6 bg-white rounded-2xl shadow-sm border border-slate-100 active:scale-95 transition-all">
+                    <div className="w-14 h-14 rounded-full bg-red-50 flex items-center justify-center mb-3"><Tv className="text-red-600" size={28} /></div>
+                    <span className="font-bold text-slate-700">TV 보기</span>
+                </button>
+            </div>
+
+            <StatsChart transactions={transactions.filter(t => t.childId === activeChildId)} />
+
+            <div className="bg-white rounded-3xl p-6 shadow-sm border border-slate-100 mb-8">
+                <h3 className="font-bold text-slate-700 mb-5 flex items-center gap-2 border-b border-slate-50 pb-3"><History size={18} className="text-slate-400" /> 최근 활동</h3>
+                <div className="space-y-4">
+                    {transactions.filter(t => t.childId === activeChildId).slice(0, 10).map(t => (
+                        <div key={t.id} className="flex items-center justify-between py-1 border-b border-slate-50 last:border-0">
+                            <div className="flex items-center gap-3">
+                                <div className={`w-9 h-9 rounded-xl flex items-center justify-center ${t.type === 'deposit' ? 'bg-green-50 text-green-600' : t.type === 'interest' ? 'bg-yellow-50 text-yellow-600' : 'bg-red-50 text-red-600'}`}>
+                                    {t.type === 'deposit' ? <BookOpen size={16} /> : t.type === 'interest' ? <TrendingUp size={16} /> : <Tv size={16} />}
+                                </div>
+                                <div>
+                                    <p className="font-bold text-slate-800 text-xs">{t.note}</p>
+                                    <p className="text-[10px] text-slate-400 mt-0.5">{new Date(t.timestamp).toLocaleDateString()} {new Date(t.timestamp).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})}</p>
+                                </div>
+                            </div>
+                            <div className={`font-display font-bold text-base ${t.type === 'withdraw' ? 'text-red-500' : 'text-green-500'}`}>
+                                {t.type === 'withdraw' ? '-' : '+'}{t.amount}분
+                            </div>
+                        </div>
+                    ))}
+                </div>
+            </div>
+          </div>
+      )}
+
+      {/* Modals */}
+      <Modal isOpen={isModalOpen} onClose={() => setIsModalOpen(false)} title={modalType === 'deposit' ? '📚 공부 시간 기록' : '📺 TV 시청 시간'}>
         {step === 'category-select' ? (
            modalType === 'deposit' ? renderStudyCategorySelection() : renderWithdrawCategorySelection()
         ) : (
           <div className="flex flex-col items-center">
-             <div className="mb-4 text-center">
-               <span className={`text-sm px-3 py-1 rounded-full font-bold ${
-                 modalType === 'deposit' 
-                    ? 'bg-green-50 text-green-600'
-                    : 'bg-red-50 text-red-600'
-               }`}>
-                  {modalType === 'deposit' 
-                    ? `${getStudyCategoryLabel(selectedStudyType)} (x${settings.multipliers[selectedStudyType]})`
-                    : `${getWithdrawCategoryLabel(selectedWithdrawType)} (x${settings.withdrawMultipliers[selectedWithdrawType]})`
-                  }
-               </span>
-             </div>
-
-            <div className="flex items-baseline gap-2 mb-2">
-              <span className="text-5xl font-bold text-slate-800 font-display">
-                  {inputAmount > 0 ? inputAmount : 0}
-              </span>
-              <span className="text-xl text-slate-500 font-medium">분</span>
+            <div className="text-center mb-6">
+                <div className="text-5xl font-bold text-slate-800 font-display mb-2">{inputAmount}분</div>
+                {inputAmount > 0 && <p className="text-xs text-slate-400">= 실제 {Math.floor(inputAmount * (modalType === 'deposit' ? settings.multipliers[selectedStudyType] : settings.withdrawMultipliers[selectedWithdrawType]))}분 {modalType === 'deposit' ? '적립' : '차감'}</p>}
             </div>
-            
-            {/* Dynamic Calculation Preview */}
-            {inputAmount > 0 && (
-                <div className="mb-4 text-slate-500 font-medium animate-pulse text-sm">
-                    = 실제 
-                    <span className={`font-bold mx-1 ${modalType === 'deposit' ? 'text-green-600' : 'text-red-600'}`}>
-                        {Math.floor(inputAmount * (modalType === 'deposit' ? settings.multipliers[selectedStudyType] : settings.withdrawMultipliers[selectedWithdrawType]))}분
-                    </span> 
-                    {modalType === 'deposit' ? '적립' : '차감'}
-                </div>
-            )}
-            
-            <p className="text-sm text-slate-400 mb-6 text-center">
-              {modalType === 'deposit' 
-                ? `${activeChild.name}, 오늘 얼마나 집중했나요?` 
-                : `${activeChild.name}, 얼마나 볼 건가요?`}
-            </p>
-
             <div className="w-full">
-              <button
-                disabled={inputAmount === 0 || isProcessing}
-                onClick={handleTransaction}
-                className={`w-full py-4 rounded-xl text-white font-bold text-lg shadow-md transition-all active:scale-95 flex items-center justify-center gap-2 ${
-                  inputAmount === 0 
-                    ? 'bg-slate-300 cursor-not-allowed' 
-                    : modalType === 'deposit' 
-                      ? 'bg-green-500 hover:bg-green-600 shadow-green-200' 
-                      : 'bg-red-500 hover:bg-red-600 shadow-red-200'
-                }`}
-              >
-                {isProcessing ? (
-                  <>
-                    <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-white"></div>
-                    처리중...
-                  </>
-                ) : (
-                  '확인'
-                )}
+              <button disabled={inputAmount === 0 || isProcessing} onClick={handleTransaction} className={`w-full py-4 rounded-2xl text-white font-bold text-lg shadow-lg active:scale-95 transition-all flex items-center justify-center gap-2 ${inputAmount === 0 ? 'bg-slate-300' : modalType === 'deposit' ? 'bg-green-500' : 'bg-red-500'}`}>
+                {isProcessing ? <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-white"></div> : '기록하기'}
               </button>
               <NumberKeypad onValueChange={setInputAmount} />
             </div>
@@ -708,183 +541,54 @@ const App = () => {
         )}
       </Modal>
 
-      {/* Login Modal */}
-      <Modal 
-        isOpen={showLoginModal}
-        onClose={() => setShowLoginModal(false)}
-        title="부모님 로그인"
-      >
-        <div className="text-center py-4">
-          <div className="w-16 h-16 bg-blue-50 rounded-full flex items-center justify-center mx-auto mb-4">
-            <Lock className="text-blue-500" size={32} />
-          </div>
-          <p className="text-slate-600 mb-6">설정 변경 및 자녀 관리를 위해<br/>로그인이 필요합니다.</p>
-          
-          <button
-            onClick={handleParentLogin}
-            className="w-full bg-white border border-slate-300 hover:bg-slate-50 text-slate-700 font-medium py-3 px-4 rounded-xl flex items-center justify-center gap-3 transition-colors shadow-sm"
-          >
-            <svg className="w-5 h-5" viewBox="0 0 24 24">
-              <path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" fill="#4285F4"/>
-              <path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/>
-              <path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" fill="#FBBC05"/>
-              <path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335"/>
-            </svg>
-            Google 계정으로 로그인
-          </button>
-          <p className="text-xs text-slate-400 mt-4">* 실제 인증은 서버가 필요하므로<br/>데모에서는 시뮬레이션으로 처리됩니다.</p>
-        </div>
-      </Modal>
-
-      {/* Settings Modal */}
-      <Modal
-        isOpen={showSettingsModal}
-        onClose={() => setShowSettingsModal(false)}
-        title="설정 관리"
-      >
-        <div className="space-y-6">
-          {/* Deposit Multipliers */}
-          <div>
-            <h4 className="font-bold text-slate-700 mb-3 flex items-center gap-2">
-              <TrendingUp size={18} className="text-green-500" />
-              공부 적립 배수
-            </h4>
-            <div className="grid grid-cols-1 gap-3 bg-slate-50 p-4 rounded-xl">
-              <div className="flex items-center justify-between gap-4">
-                <span className="text-slate-600 text-sm font-medium">문제집 풀기</span>
-                <div className="flex items-center gap-2">
-                    <span className="text-xs text-slate-400">배</span>
-                    <input 
-                    type="number" step="0.1" min="1.0"
-                    value={settings.multipliers.workbook}
-                    onChange={(e) => setSettings({...settings, multipliers: {...settings.multipliers, workbook: parseFloat(e.target.value)}})}
-                    className="w-20 p-2 rounded-lg border border-slate-200 text-center font-bold text-green-600 focus:outline-none focus:border-green-400 focus:ring-1 focus:ring-green-400"
-                    />
-                </div>
-              </div>
-              <div className="flex items-center justify-between gap-4">
-                <span className="text-slate-600 text-sm font-medium">책 보기</span>
-                <div className="flex items-center gap-2">
-                    <span className="text-xs text-slate-400">배</span>
-                    <input 
-                    type="number" step="0.1" min="1.0"
-                    value={settings.multipliers.book}
-                    onChange={(e) => setSettings({...settings, multipliers: {...settings.multipliers, book: parseFloat(e.target.value)}})}
-                    className="w-20 p-2 rounded-lg border border-slate-200 text-center font-bold text-emerald-600 focus:outline-none focus:border-emerald-400 focus:ring-1 focus:ring-emerald-400"
-                    />
-                </div>
-              </div>
-              <div className="flex items-center justify-between gap-4">
-                <span className="text-slate-600 text-sm font-medium">영상 공부</span>
-                <div className="flex items-center gap-2">
-                    <span className="text-xs text-slate-400">배</span>
-                    <input 
-                    type="number" step="0.1" min="1.0"
-                    value={settings.multipliers.video}
-                    onChange={(e) => setSettings({...settings, multipliers: {...settings.multipliers, video: parseFloat(e.target.value)}})}
-                    className="w-20 p-2 rounded-lg border border-slate-200 text-center font-bold text-teal-600 focus:outline-none focus:border-teal-400 focus:ring-1 focus:ring-teal-400"
-                    />
-                </div>
-              </div>
-            </div>
-          </div>
-
-          {/* Withdraw Multipliers */}
-          <div>
-            <h4 className="font-bold text-slate-700 mb-3 flex items-center gap-2">
-              <Tv size={18} className="text-red-500" />
-              사용 차감 배수
-            </h4>
-            <div className="grid grid-cols-1 gap-3 bg-slate-50 p-4 rounded-xl">
-              <div className="flex items-center justify-between gap-4">
-                <span className="text-slate-600 text-sm font-medium">유튜브/게임</span>
-                <div className="flex items-center gap-2">
-                    <span className="text-xs text-slate-400">배</span>
-                    <input 
-                    type="number" step="0.1" min="1.0"
-                    value={settings.withdrawMultipliers.youtube_game}
-                    onChange={(e) => setSettings({...settings, withdrawMultipliers: {...settings.withdrawMultipliers, youtube_game: parseFloat(e.target.value)}})}
-                    className="w-20 p-2 rounded-lg border border-slate-200 text-center font-bold text-red-600 focus:outline-none focus:border-red-400 focus:ring-1 focus:ring-red-400"
-                    />
-                </div>
-              </div>
-              <div className="flex items-center justify-between gap-4">
-                <span className="text-slate-600 text-sm font-medium">TV 시청</span>
-                <div className="flex items-center gap-2">
-                    <span className="text-xs text-slate-400">배</span>
-                    <input 
-                    type="number" step="0.1" min="1.0"
-                    value={settings.withdrawMultipliers.tv_watch}
-                    onChange={(e) => setSettings({...settings, withdrawMultipliers: {...settings.withdrawMultipliers, tv_watch: parseFloat(e.target.value)}})}
-                    className="w-20 p-2 rounded-lg border border-slate-200 text-center font-bold text-orange-600 focus:outline-none focus:border-orange-400 focus:ring-1 focus:ring-orange-400"
-                    />
-                </div>
-              </div>
-            </div>
-          </div>
-
-          {/* Interest Settings */}
-          <div>
-             <h4 className="font-bold text-slate-700 mb-3 flex items-center gap-2">
-              <PiggyBank size={18} className="text-yellow-500" />
-              이자 시스템 설정
-            </h4>
-             <div className="space-y-3 bg-slate-50 p-4 rounded-xl">
-               <div className="flex items-center justify-between">
-                  <span className="text-slate-600 text-sm font-medium">일일 이자율</span>
-                  <div className="flex items-center gap-2">
-                      <input 
-                        type="number" step="0.01" min="0" max="1"
-                        value={settings.interestRate}
-                        onChange={(e) => setSettings({...settings, interestRate: parseFloat(e.target.value)})}
-                        className="w-20 p-2 rounded-lg border border-slate-200 text-center font-bold text-yellow-600 focus:outline-none focus:border-yellow-400"
-                      />
-                  </div>
-               </div>
-               <div className="flex justify-between text-xs text-slate-400 px-1">
-                   <span>현재: {Math.round(settings.interestRate * 100)}%</span>
-               </div>
-               
-               <div className="border-t border-slate-200 my-2"></div>
-
-               <div className="flex items-center justify-between">
-                  <span className="text-slate-600 text-sm font-medium">TV 미시청 기준</span>
-                  <div className="flex items-center gap-2">
-                      <span className="text-xs text-slate-400">시간</span>
-                      <input 
-                        type="number" step="1" min="1"
-                        value={settings.interestThresholdHours}
-                        onChange={(e) => setSettings({...settings, interestThresholdHours: parseInt(e.target.value)})}
-                        className="w-20 p-2 rounded-lg border border-slate-200 text-center font-bold text-slate-600 focus:outline-none focus:border-slate-400"
-                      />
-                  </div>
-               </div>
-             </div>
-          </div>
-          
-          <div className="pt-2">
-             <button 
-               onClick={() => {
-                   setSettings(DEFAULT_SETTINGS);
-                   alert("설정이 초기화되었습니다.");
-               }}
-               className="w-full py-3 text-sm text-slate-400 hover:text-red-500 hover:bg-red-50 rounded-xl transition-colors flex items-center justify-center gap-2"
-             >
-                 <Trash2 size={16} />
-                 설정 초기화
+      <Modal isOpen={showLoginModal} onClose={() => setShowLoginModal(false)} title="부모님 로그인">
+        <div className="text-center py-6">
+          <div className="w-16 h-16 bg-blue-50 rounded-full flex items-center justify-center mx-auto mb-4"><Lock className="text-blue-500" size={32} /></div>
+          <p className="text-slate-600 mb-8 font-medium">대시보드 확인 및 설정을 위해<br/>보호자 인증이 필요합니다.</p>
+          <button onClick={() => { setIsParentMode(true); setShowLoginModal(false); }} className="w-full bg-slate-900 text-white font-bold py-4 rounded-2xl shadow-lg active:scale-95 transition-all">Google 계정으로 계속하기</button>
+          <div className="mt-6 pt-6 border-t border-slate-100 flex flex-col gap-3">
+             <button onClick={handleOpenApiKeySelection} className="text-xs text-indigo-500 font-bold flex items-center justify-center gap-1 mx-auto bg-indigo-50 px-4 py-2 rounded-xl border border-indigo-100">
+                <Key size={14} /> API 키 재설정 (오류 발생 시)
              </button>
           </div>
         </div>
       </Modal>
 
-      {/* AI Toast Notification */}
+      <Modal isOpen={showSettingsModal} onClose={() => setShowSettingsModal(false)} title="배수 설정 관리">
+        <div className="space-y-6 pb-4">
+          <div>
+            <h4 className="font-bold text-slate-700 mb-3 flex items-center gap-2"><TrendingUp size={18} className="text-green-500" /> 적립 및 차감 배수</h4>
+            <div className="space-y-3 bg-slate-50 p-4 rounded-2xl border border-slate-100">
+              {[ 
+                {k:'workbook', l:'문제집(적립)', c:'green', t:'multipliers'}, 
+                {k:'book', l:'책 읽기(적립)', c:'emerald', t:'multipliers'}, 
+                {k:'youtube_game', l:'유튜브/게임(차감)', c:'red', t:'withdrawMultipliers'} 
+              ].map(item => (
+                <div key={item.k} className="flex items-center justify-between gap-4">
+                  <span className="text-slate-600 text-sm font-bold">{item.l}</span>
+                  <div className="flex items-center gap-2">
+                    <input type="number" step="0.1" value={// @ts-ignore
+                    settings[item.t][item.k]} onChange={(e) => setSettings({...settings, [item.t]: {...settings[item.t as keyof AppSettings] as object, [item.k]: parseFloat(e.target.value) || 1}})} className="w-20 p-2 rounded-xl border border-slate-200 text-center font-bold bg-white outline-none" />
+                    <span className="text-[10px] font-bold text-slate-400">배</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+          <div className="pt-4 border-t border-slate-100">
+             <p className="text-[10px] text-slate-400 mb-3">※ 배수 설정은 소수점 첫째 자리까지 입력 가능합니다.</p>
+             <button onClick={() => { setSettings(DEFAULT_SETTINGS); alert("초기화되었습니다."); }} className="w-full py-4 text-xs font-bold text-slate-400 border border-dashed border-slate-200 rounded-2xl hover:text-red-500 hover:bg-red-50">설정 초기값으로 복구</button>
+          </div>
+        </div>
+      </Modal>
+
       {aiToast && (
-        <div className="fixed top-20 left-1/2 -translate-x-1/2 z-[60] w-[90%] max-w-sm px-0 animate-in slide-in-from-top-4 fade-in duration-300">
-          <div className="bg-slate-800/95 backdrop-blur-md text-white px-5 py-4 rounded-2xl shadow-2xl flex items-start gap-3 border border-slate-700">
-             <div className="text-2xl animate-bounce">🤖</div>
-             <div>
-               <p className="font-bold text-yellow-300 text-sm mb-0.5">AI 가디언</p>
-               <p className="text-sm leading-relaxed">{aiToast}</p>
+        <div className="fixed top-24 left-1/2 -translate-x-1/2 z-[60] w-[92%] max-w-sm px-0 animate-in slide-in-from-top-6 fade-in duration-500">
+          <div className="bg-slate-900/95 backdrop-blur-xl text-white px-6 py-5 rounded-[2rem] shadow-2xl flex items-start gap-4 border border-white/10 ring-1 ring-white/20">
+             <div className="text-3xl animate-bounce">🤖</div>
+             <div className="flex-1">
+               <p className="font-bold text-yellow-400 text-[10px] mb-1 uppercase tracking-widest">AI Guardian</p>
+               <p className="text-sm leading-relaxed font-medium">{aiToast}</p>
              </div>
           </div>
         </div>

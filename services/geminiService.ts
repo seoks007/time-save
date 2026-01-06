@@ -1,14 +1,14 @@
 import { GoogleGenAI } from "@google/genai";
 import { TransactionType } from "../types";
 
-const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-
 export const getEncouragementMessage = async (
   childName: string,
   amount: number,
   type: TransactionType
 ): Promise<string> => {
   try {
+    // Re-initialize to ensure we use the latest injected API key from process.env.API_KEY
+    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
     const model = 'gemini-3-flash-preview';
     
     let prompt = "";
@@ -35,9 +35,21 @@ export const getEncouragementMessage = async (
     });
 
     return response.text || "참 잘했어요! 👍";
-  } catch (error) {
-    console.error("Gemini API Error:", error);
-    // Fallback messages in case of API failure
+  } catch (error: any) {
+    console.error("Gemini API Error Detail:", error);
+    
+    const errorMsg = error.message || "";
+    // "Requested entity was not found" or "API_KEY" or project errors often require a key re-selection
+    if (
+      errorMsg.includes("Requested entity was not found") || 
+      errorMsg.includes("API_KEY") ||
+      errorMsg.includes("project") ||
+      errorMsg.includes("permission")
+    ) {
+      throw new Error("API_KEY_ISSUE");
+    }
+
+    // Fallback messages if it's just a temporary network glitch
     if (type === 'deposit') return `${childName}, 정말 대단해! 오늘도 열심히 했구나! 👏`;
     return `${childName}, 즐거운 TV 시간 보내! 📺`;
   }
